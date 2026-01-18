@@ -1,6 +1,14 @@
 import torch 
+import torch.nn as nn 
+from torch.nn import functional as F
 
 
+batch_size = 32 
+context_size = 8 
+max_iterations = 7000
+eval_interval = 200
+learning_rate = 1e-3
+eval_iterations = 200
 with open('input.txt', 'r', encoding='utf-8') as f: 
     text = f.read()
 
@@ -36,8 +44,7 @@ val_data = data[split_size:]
 
 #Create a function that randomly grabs a batch of data 
 #from the training dataset. 
-batch_size = 32 
-context_size = 8 
+
 
 def get_batch(split: str, gpu=False): 
     data = train_data if split=='train' else val_data
@@ -57,8 +64,7 @@ Now this relationship's name would be a Bigram model, because we look at the
 prev character to predict the next one. 
 """
 
-import torch.nn as nn 
-from torch.nn import functional as F
+
 
 class BigramLanguageModel(nn.Module): 
     def __init__(self, vocab_size): 
@@ -142,30 +148,54 @@ print("===" * 20)
 print("its gibberish because a bigram is a dumb model, but we can train the model ")
 print("===" * 20)
 print(f"Now its time to TRAIN THE ACTUAL MODEL AND LOWEST BOUND FOR IT IS THE STATISTICAL FREQUENCY OF IT.(count each occurence)")
+
+@torch.no_grad() #No storing a computational graph for it since we wont call backprop on these variables. 
+def estimate_loss(): 
+    out = {}
+    m.eval()
+    for split in ['train','val']: 
+        losses = torch.zeros(eval_iterations)
+        for k in range(eval_iterations): 
+            X, Y = get_batch(split, gpu=True)
+            logits, loss = m(X,Y)
+            losses[k] =  loss.item()
+        out[split] = losses.mean()
+    m.train()
+    return out
+
+final_loss = 100 #usually it should be MAX_INT
+
+def train_bigram(m): 
+    m = m.to(device="cuda")
+    optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+    global final_loss
+    print("===" * 20)
+    print("The LOSS IS ")
+
+    for step in range(max_iterations): 
+        #cal and display loss on train and val data. 
+        if step % eval_interval ==0: 
+            losses = estimate_loss()
+            print(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            
+            if losses['val'] < final_loss: 
+                final_loss = losses['val']                
+        
+        #sampling from the train  data  
+        xb,yb = get_batch('train', gpu=True)
+
+        logits, loss = m(xb, yb)
+        optimizer.zero_grad(set_to_none=True) #make optimizer's gradients stored from prev loop = 0.  
+        #if this line is followed by a backward pass, .grads are guaranteed to be None for params that did not receive a gradient.
+        #it  skips the update for gradients whose update is none. PyTorch simply deletes the gradient tensor
+        loss.backward()
+        optimizer.step()
 choice = input("IF YOU WANT TO TRAIN THE MODEL, PRESS 1. OR PRESS 0 TO EXIT\n")
 if choice==0: 
     print("EXITING THE PROCESS")
 else: 
     print("TRAINING THE MODEL ====================")
-    m = m.to(device="cuda")
-    optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
-
-    batch_size =32
-    print("===" * 20)
-    print("The LOSS IS ")
-
-    for steps in range(10000): 
-        #sampling from the train  data  
-        xb, yb = get_batch('train',gpu=True)
-
-        logits, loss = m(xb, yb)
-        optimizer.zero_grad(set_to_none=True) #make optimizer's gradients stored from prev loop = 0.  
-        #if this line is followed by a backward pass, .grads are guaranteed to be None for params that did not receive a gradient.
-        #it doesnt do torch.optim for skips the update for gradients whose update is none. PyTorch simply deletes the gradient tensor
-        loss.backward()
-        optimizer.step()
-        if steps % 100 == 0:
-            print(loss.item())
+    train_bigram(m)
 
 
 print("===" * 20)
@@ -176,8 +206,7 @@ print(decode(m.generate(idx, max_new_tokens=1000)[0].tolist()))
 print("===" * 20)
 print("Lets save this model if we feel its loss is good.")
 
-current_loss = loss.item()
-if current_loss < 2.7:
-    torch.save(m.state_dict(), 'trained_model/bigram_model_shakespeare.pth')
-    print(f"Saved a model to disk because its loss is {current_loss}")
+if final_loss < 2.7:
+    torch.save(m.state_dict(), 'trained_model/bigram_model_loss_{final_loss}.pth')
+    print(f"Saved a model to disk because its loss is {final_loss}")
 
