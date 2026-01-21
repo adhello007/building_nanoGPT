@@ -2,7 +2,16 @@ import torch
 import torch.nn as nn 
 from torch.nn import functional as F
 
-
+"""
+If you take a token index, convert it into a one-hot vector 
+(a vector of zeros with a "1" at the token's position),
+ and pass it through an nn.Linear layer (with no bias), 
+ the result is identical to nn.Embedding.$$OneHot(index) 
+ \times WeightMatrix = Row(index)$$The reason we use nn.Embedding 
+ for token tables instead of nn.Linear is efficiency. 
+ In a vocabulary of 50,000 words, a one-hot vector has 49,999 zeros.
+ Multiplying by those zeros is a waste of computer power. nn.Embedding skips the math and just fetches the row.
+"""
 batch_size = 32 
 context_size = 8 
 max_iterations = 7000
@@ -82,20 +91,19 @@ class BigramLanguageModel(nn.Module):
         [52, 58,  1, 58, 46, 39, 58,  1],   # Row 2
         [25, 17, 27, 10,  0, 21,  1, 54]])
 
-        B (Batch) = 4: There are 4 rows.
+        B (Batch) = eg 4: There are 4 rows.
 
-        T (Time/Context) = 8: There are 8 columns (integers) in each row.
+        T (Time/Context) = eg 8: There are 8 columns (integers) in each row.
 
-        They are 32 independent prediction problems
+        so in this eg, they are 32 independent prediction problems
           packed into a (4, 8) grid for convenience.
         """
-        logits = self.token_embedding_table(idx)
-
+        logits = self.token_embedding_table(idx) #raw scores given for each character.
         if targets is None: 
             loss = None
         else: 
             B,T, C = logits.shape #We get the 
-            logits = logits.view(B*T, C) #32 X 65 
+            logits = logits.view(B*T, C) #batch_size X context_size  X vocab_size 
             targets = targets.view(B*T)
             
             loss = F.cross_entropy(logits, targets) #(B,C)

@@ -18,6 +18,8 @@ max_iterations = 7000
 eval_interval = 200
 learning_rate = 1e-3
 eval_iterations = 200
+n_embed=32 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 with open('input.txt', 'r', encoding='utf-8') as f: 
     text = f.read()
 
@@ -61,7 +63,7 @@ def get_batch(split: str, gpu=False):
     x = torch.stack([data[i:i+context_size] for i in ix])
     y = torch.stack([data[i+1:i+context_size+1] for i in ix])
     if gpu==True: 
-        x, y = x.to(device='cuda'), y.to(device='cuda')
+        x, y = x.to(device=device), y.to(device=device)
     return x, y 
 
 
@@ -76,29 +78,51 @@ prev character to predict the next one.
 
 
 class BigramLanguageModel(nn.Module): 
-    def __init__(self, vocab_size): 
+    def __init__(self): 
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #B , T , C
+        self.lm_head = nn.Linear(n_embed, vocab_size) #B, T, vocab_size
+        self.position_embedding_table = nn.Embedding(context_size, n_embed) #position matters only 
+        #for the entire context_size. 
 
     def forward(self, idx, targets=None):   
         """
-        idx is not a single character. 
-        idx is exactly the tensor x (or xb) that comes out
-         of your get_batch function.
+        previously we used the nn.Embedding layer directly to calculate the raw scores, 
+        which were then passed to cross_entropy to cal loss bw the pred and the target. 
 
-         tensor([[24, 43, 58,  5, 57,  1, 46, 43],   # Row 0
-        [44, 53, 56,  1, 58, 46, 39, 58],   # Row 1
-        [52, 58,  1, 58, 46, 39, 58,  1],   # Row 2
-        [25, 17, 27, 10,  0, 21,  1, 54]])
+        We are moving from a "Lookup Table" model to a "Neural Network" model.
+        Earlier we calculated the next prediction of a character via the embedding column outputs (65)
+        on which we would perform softmax. 
 
-        B (Batch) = 4: There are 4 rows.
+        Even after training, the current character can only predict its next character 
+        as the weights from the training dataset (more like pattern recognition or statistical frequency.)
 
-        T (Time/Context) = 8: There are 8 columns (integers) in each row.
+        It has no context of the previous characters that came before it, it simply 
+        shouts, THIS IS THE NEXT CHARACTER GIVEN WE INPUT THIS CHARACTER. 
 
-        They are 32 independent prediction problems
-          packed into a (4, 8) grid for convenience.
+        Now, we have split the process:
+            self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+            self.lm_head = nn.Linear(n_embed, vocab_size)
+
+        When 43 ('a') comes in, we look up a vector of size 32. These 32 numbers are NOT predictions. 
+        They are Attributes (or Features) of the character 'a'.
+
+        This vector (B, T, n_embed) is the "Hidden State". 
+        It is the model's internal representation of the data before it tries to guess the answer.
+
+        we have lm_head (Language Modeling Head). 
+        Its job is to take those 32 attributes and translate them into 65 probabilities.
+
+        We you want to use Self-Attention,so we need a "workspace" where the tokens can talk to each other, 
+        which we do in the hidden state of tok_embd (nn.Embedding) (internal features or representations.)
         """
-        logits = self.token_embedding_table(idx)
+        B, T = idx.shape
+        tok_emb = self.token_embedding_table(idx) #(B,T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #ints from 0 to T-1. #(T,C)
+
+        x = tok_emb + pos_emb #(B,T,C)
+        
+        logits = self.lm_head(x) #language modeling head. 
 
         if targets is None: 
             loss = None
@@ -128,7 +152,7 @@ class BigramLanguageModel(nn.Module):
 #of the embeddings give a loss. 
 
 xb, yb = get_batch('train')
-m = BigramLanguageModel(vocab_size)
+m = BigramLanguageModel()
 logits, loss =  m(xb, yb) 
 print("===" * 20)
 print(f"\nThe LOSS for a standard UNTRAINED MODEL OF RANDOM INITILAIZATIONS: \n")
@@ -175,7 +199,7 @@ def estimate_loss():
 final_loss = 100 #usually it should be MAX_INT
 
 def train_bigram(m): 
-    m = m.to(device="cuda")
+    m = m.to(device=device)
     optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
     global final_loss
     print("===" * 20)
@@ -210,7 +234,7 @@ else:
 print("===" * 20)
 print("LETS RUN INFERENCE ON THIS")
 idx = torch.zeros((1, 1), dtype=torch.long)
-idx = idx.to(device='cuda') #imp since model is in the GPU.
+idx = idx.to(device=device) #imp since model is in the GPU.
 print(decode(m.generate(idx, max_new_tokens=1000)[0].tolist()))
 print("===" * 20)
 print("Lets save this model if we feel its loss is good.")
