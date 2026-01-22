@@ -14,8 +14,8 @@ If you take a token index, convert it into a one-hot vector
 """
 batch_size = 32 
 context_size = 8 
-max_iterations = 7000
-eval_interval = 200
+max_iterations = 5000
+eval_interval = 500
 learning_rate = 1e-3
 eval_iterations = 200
 n_embed=32 
@@ -44,10 +44,9 @@ decode = lambda l: ''.join([itos[i] for i in l])
 
 data = torch.tensor(encode(text), dtype=torch.long)
 print("===" * 20)
-print("\nThe input text converted into a tensor data\n")
+print("\nThe input text seen as converted into a tensor data\n")
 print(data.shape)
 print(data[:100])
-
 #Lets do a train-test split 
 split_size = int(0.9*(len(data))) 
 train_data =  data[:split_size]
@@ -73,17 +72,58 @@ input character that is in the dataset. This is what our entire goal would be.
 
 Now this relationship's name would be a Bigram model, because we look at the 
 prev character to predict the next one. 
-"""
+""" 
+class Head(nn.Module): 
+    def __init__(self, head_size): 
+        super().__init__()
+        self.key = nn.Linear(n_embed, head_size, bias=False)
+        self.query = nn.Linear(n_embed, head_size, bias=False)
+        self.value = nn.Linear(n_embed, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(context_size,head_size)))  #it should be context_size by context_size 
 
+    def forward(self, x):
+        B,T,C = x.shape  
 
+        k = self.key(x) #B,T,C
+        q = self.query(x) #B,T,C
+
+        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 #We are using head_size here instead of C because q and k are projected down. 
+        wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf'))
+        wei = F.softmax(wei, dim=-1) #against the channel dimension
+
+        #perform weighted aggregation of the values 
+        v = self.value(x) # (B, T, head_size)
+        out = wei @ v 
+        return out 
+    
+class MultiHeadedAttention(nn.Module): 
+    def __init__(self, num_heads, head_size): 
+        super().__init__() 
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x): 
+        return torch.cat([h(x) for h in self.heads], dim=-1) #concatenate against the channel dimension . 
+
+class FeedForward(nn.Module): 
+    def __init__(self, n_embed): 
+        super().__init__()  
+        self.ff_head = nn.Sequential(
+            nn.Linear(n_embed, n_embed), 
+            nn.ReLU()
+        )
+
+    def forward(self, x): 
+        return self.ff_head(x)
 
 class BigramLanguageModel(nn.Module): 
     def __init__(self): 
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #B , T , C
+        self.position_embedding_table = nn.Embedding(context_size, n_embed) #position matters only for the entire context_size. 
+        self.sa_head = MultiHeadedAttention(4, n_embed // 4) 
+        self.ffwd = FeedForward(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size) #B, T, vocab_size
-        self.position_embedding_table = nn.Embedding(context_size, n_embed) #position matters only 
-        #for the entire context_size. 
+        
 
     def forward(self, idx, targets=None):   
         """
@@ -121,14 +161,16 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #ints from 0 to T-1. #(T,C)
 
         x = tok_emb + pos_emb #(B,T,C)
-        
-        logits = self.lm_head(x) #language modeling head. 
+        sa_head = self.sa_head(x)
+
+        ff = self.ffwd(sa_head) #The communication here across tokens gives them the ability to think before reaching the prediction phase. 
+        logits = self.lm_head(ff) #language modeling head. This is where they predict the next token. 
 
         if targets is None: 
             loss = None
         else: 
-            B,T, C = logits.shape #We get the 
-            logits = logits.view(B*T, C) #32 X 65 
+            B,T, C = logits.shape  
+            logits = logits.view(B*T, C) 
             targets = targets.view(B*T)
             
             loss = F.cross_entropy(logits, targets) #(B,C)
@@ -137,22 +179,25 @@ class BigramLanguageModel(nn.Module):
 
 
     def generate(self, idx, max_new_tokens): 
-        for _ in range(max_new_tokens): 
-            logits, _ = self(idx) 
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -context_size:] #We crop the idx to the context size because we 
+            #only have the position embedding of the context_size
+            logits, _ = self(idx_cond) 
 
             logits = logits[:, -1, :] 
             probs = F.softmax(logits, dim=-1) # (B , C)
 
             idx_next = torch.multinomial(probs, num_samples=1) #(B, 1)
 
-            idx = torch.cat((idx,idx_next), dim=1) 
+            idx = torch.cat((idx,idx_next), dim=1) #(B, T+1)
         return idx
 
 #Lets run inference on it to find out how random initializations 
 #of the embeddings give a loss. 
 
-xb, yb = get_batch('train')
+xb, yb = get_batch('train', gpu=True)
 m = BigramLanguageModel()
+m = m.to(device=device)
 logits, loss =  m(xb, yb) 
 print("===" * 20)
 print(f"\nThe LOSS for a standard UNTRAINED MODEL OF RANDOM INITILAIZATIONS: \n")
@@ -165,10 +210,11 @@ print("===" * 20)
 print("Lets try and generate some text from it. ")
 print("Generating the first 100 characters from the above model\n")
 print("We start from a single character which means batch =1, means one single story that we want from the author")
-print(", the first character from our vocab itos[0]")
+print(",the first character from our vocab itos[0]")
 print("===" * 20)
 idx = torch.zeros((1,1), dtype=torch.long) #(B = how many decoding texts in parallel do we want to decode. T = What start character from itos[index] should index be.)
 #print(decode(m.generate(idx, max_new_tokens=100)[0].tolist()))
+idx = idx.to(device=device)
 generated_batch = m.generate(idx, max_new_tokens=100)
 
 #itterate through each row in the batch
@@ -178,7 +224,7 @@ for i in range(generated_batch.shape[0]):
     print(decode(row))
 
 print("===" * 20)
-print("its gibberish because a bigram is a dumb model, but we can train the model ")
+print("its gibberish because the lm_heads, attention heads etc are all randomly initialized right now, but we can train the model ")
 print("===" * 20)
 print(f"Now its time to TRAIN THE ACTUAL MODEL AND LOWEST BOUND FOR IT IS THE STATISTICAL FREQUENCY OF IT.(count each occurence)")
 
@@ -199,7 +245,7 @@ def estimate_loss():
 final_loss = 100 #usually it should be MAX_INT
 
 def train_bigram(m): 
-    m = m.to(device=device)
+   # m = m.to(device=device) #it is already now being shifted to the gpu post initialization
     optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
     global final_loss
     print("===" * 20)
@@ -240,6 +286,6 @@ print("===" * 20)
 print("Lets save this model if we feel its loss is good.")
 
 if final_loss < 2.7:
-    torch.save(m.state_dict(), 'trained_model/bigram_model_loss_{final_loss}.pth')
+    torch.save(m.state_dict(), f'trained_model/bigram_model_loss_{final_loss:.3f}.pth')
     print(f"Saved a model to disk because its loss is {final_loss}")
 
