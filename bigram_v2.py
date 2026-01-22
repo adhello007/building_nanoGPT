@@ -100,28 +100,54 @@ class MultiHeadedAttention(nn.Module):
     def __init__(self, num_heads, head_size): 
         super().__init__() 
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-
+        self.proj = nn.Linear(n_embed, n_embed) #This is the Wo Output Matrix. 
     def forward(self, x): 
-        return torch.cat([h(x) for h in self.heads], dim=-1) #concatenate against the channel dimension . 
+        out = torch.cat([h(x) for h in self.heads], dim=-1) #concatenate against the channel dimension. 
+        out = self.proj(out) # instead of simply passing on concatenated individual head info, 
+        #we use a simple projection layer so that the model can combine these individual infos more coherently. 
+        return out
 
 class FeedForward(nn.Module): 
     def __init__(self, n_embed): 
         super().__init__()  
         self.ff_head = nn.Sequential(
-            nn.Linear(n_embed, n_embed), 
-            nn.ReLU()
+            nn.Linear(n_embed, n_embed*4), #in the paper its mentioned that the inner hidden layer is 4 times the input feature length.
+            nn.ReLU(),
+            nn.Linear(4*n_embed, n_embed), #This is also the projection layer(Wo) like our MultiHeadedAttention proj layer. 
         )
 
     def forward(self, x): 
         return self.ff_head(x)
+    
+class TransformerBlock(nn.Module): 
+    def __init__(self, n_embed, n_head):
+        super().__init__()
+        head_size = n_embed // n_head 
+        self.sa = MultiHeadedAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embed)
 
+    def forward(self, x): 
+        x = x + self.sa(x)   
+        x = x + self.ffwd(x)
+        return x 
+    """
+    when i write x = x + self. sa(x), i create a two diverging paths:
+        path a (Residual): pass x directly to the output unchanged.
+        path b (Sub-Network): pass x through attention/linear layers to get updated values. 
+    """
+    
 class BigramLanguageModel(nn.Module): 
     def __init__(self): 
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #B , T , C
         self.position_embedding_table = nn.Embedding(context_size, n_embed) #position matters only for the entire context_size. 
-        self.sa_head = MultiHeadedAttention(4, n_embed // 4) 
-        self.ffwd = FeedForward(n_embed)
+        self.transformer_blocks = nn.Sequential(
+            TransformerBlock(n_embed, n_head=4), 
+            TransformerBlock(n_embed, n_head=4), 
+            TransformerBlock(n_embed, n_head=4), 
+            TransformerBlock(n_embed, n_head=4)
+        )
+
         self.lm_head = nn.Linear(n_embed, vocab_size) #B, T, vocab_size
         
 
@@ -161,10 +187,8 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #ints from 0 to T-1. #(T,C)
 
         x = tok_emb + pos_emb #(B,T,C)
-        sa_head = self.sa_head(x)
-
-        ff = self.ffwd(sa_head) #The communication here across tokens gives them the ability to think before reaching the prediction phase. 
-        logits = self.lm_head(ff) #language modeling head. This is where they predict the next token. 
+        x = self.transformer_blocks(x)
+        logits = self.lm_head(x) #language modeling head. This is where they predict the next token. 
 
         if targets is None: 
             loss = None
