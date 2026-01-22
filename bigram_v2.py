@@ -12,13 +12,16 @@ If you take a token index, convert it into a one-hot vector
  In a vocabulary of 50,000 words, a one-hot vector has 49,999 zeros.
  Multiplying by those zeros is a waste of computer power. nn.Embedding skips the math and just fetches the row.
 """
-batch_size = 32 
-context_size = 8 
+batch_size = 64 
+context_size = 256 
 max_iterations = 5000
 eval_interval = 500
-learning_rate = 1e-3
+learning_rate = 3e-4
 eval_iterations = 200
-n_embed=32 
+n_embed=384 
+n_head=6 #number of self attention heads in parallel.   
+n_layer = 16 #number of transformer layers. 
+dropout = 0.2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 with open('input.txt', 'r', encoding='utf-8') as f: 
     text = f.read()
@@ -79,7 +82,9 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embed, head_size, bias=False)
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(context_size,head_size)))  #it should be context_size by context_size 
+        self.register_buffer('tril', torch.tril(torch.ones(context_size,context_size)))  
+
+        self.dropout = nn.Dropout(dropout) 
 
     def forward(self, x):
         B,T,C = x.shape  
@@ -90,7 +95,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 #We are using head_size here instead of C because q and k are projected down. 
         wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf'))
         wei = F.softmax(wei, dim=-1) #against the channel dimension
-
+        wei = self.dropout(wei) 
         #perform weighted aggregation of the values 
         v = self.value(x) # (B, T, head_size)
         out = wei @ v 
@@ -100,10 +105,11 @@ class MultiHeadedAttention(nn.Module):
     def __init__(self, num_heads, head_size): 
         super().__init__() 
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(n_embed, n_embed) #This is the Wo Output Matrix. 
+        self.proj = nn.Linear(n_embed, n_embed) #This is the Wo Output Matrix.
+        self.dropout = nn.Dropout(dropout) 
     def forward(self, x): 
         out = torch.cat([h(x) for h in self.heads], dim=-1) #concatenate against the channel dimension. 
-        out = self.proj(out) # instead of simply passing on concatenated individual head info, 
+        out = self.dropout(self.proj(out)) # instead of simply passing on concatenated individual head info, 
         #we use a simple projection layer so that the model can combine these individual infos more coherently. 
         return out
 
@@ -114,6 +120,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embed, n_embed*4), #in the paper its mentioned that the inner hidden layer is 4 times the input feature length.
             nn.ReLU(),
             nn.Linear(4*n_embed, n_embed), #This is also the projection layer(Wo) like our MultiHeadedAttention proj layer. 
+            nn.Dropout(dropout)
         )
 
     def forward(self, x): 
@@ -125,10 +132,11 @@ class TransformerBlock(nn.Module):
         head_size = n_embed // n_head 
         self.sa = MultiHeadedAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embed)
-
+        self.layer_norm1 = nn.LayerNorm(n_embed)
+        self.layer_norm2 = nn.LayerNorm(n_embed)
     def forward(self, x): 
-        x = x + self.sa(x)   
-        x = x + self.ffwd(x)
+        x = x + self.sa(self.layer_norm1(x))   
+        x = x + self.ffwd(self.layer_norm2(x))
         return x 
     """
     when i write x = x + self. sa(x), i create a two diverging paths:
@@ -141,13 +149,8 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #B , T , C
         self.position_embedding_table = nn.Embedding(context_size, n_embed) #position matters only for the entire context_size. 
-        self.transformer_blocks = nn.Sequential(
-            TransformerBlock(n_embed, n_head=4), 
-            TransformerBlock(n_embed, n_head=4), 
-            TransformerBlock(n_embed, n_head=4), 
-            TransformerBlock(n_embed, n_head=4)
-        )
-
+        self.transformer_blocks = nn.Sequential(*[TransformerBlock(n_embed, n_head=n_head) for _ in range(n_layer)])
+        self.layer_norm = nn.LayerNorm(n_embed)
         self.lm_head = nn.Linear(n_embed, vocab_size) #B, T, vocab_size
         
 
@@ -188,6 +191,7 @@ class BigramLanguageModel(nn.Module):
 
         x = tok_emb + pos_emb #(B,T,C)
         x = self.transformer_blocks(x)
+        x = self.layer_norm(x)
         logits = self.lm_head(x) #language modeling head. This is where they predict the next token. 
 
         if targets is None: 
