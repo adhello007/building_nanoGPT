@@ -12,6 +12,7 @@ If you take a token index, convert it into a one-hot vector
  In a vocabulary of 50,000 words, a one-hot vector has 49,999 zeros.
  Multiplying by those zeros is a waste of computer power. nn.Embedding skips the math and just fetches the row.
 """
+#18000 MiB GPU VRAM
 batch_size = 64 
 context_size = 256 
 max_iterations = 5000
@@ -71,7 +72,7 @@ def get_batch(split: str, gpu=False):
 
 """
 So essentially, we are only mapping any input character to predict the next 
-input character that is in the dataset. This is what our entire goal would be. 
+character that is in the dataset. This is what our entire goal would be. 
 
 Now this relationship's name would be a Bigram model, because we look at the 
 prev character to predict the next one. 
@@ -93,7 +94,7 @@ class Head(nn.Module):
         q = self.query(x) #B,T,C
 
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 #We are using head_size here instead of C because q and k are projected down. 
-        wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf'))
+        wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf')) #we might have a smaller T than context-size 
         wei = F.softmax(wei, dim=-1) #against the channel dimension
         wei = self.dropout(wei) 
         #perform weighted aggregation of the values 
@@ -125,7 +126,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x): 
         return self.ff_head(x)
-    
+
 class TransformerBlock(nn.Module): 
     def __init__(self, n_embed, n_head):
         super().__init__()
@@ -167,7 +168,7 @@ class BigramLanguageModel(nn.Module):
         as the weights from the training dataset (more like pattern recognition or statistical frequency.)
 
         It has no context of the previous characters that came before it, it simply 
-        shouts, THIS IS THE NEXT CHARACTER GIVEN WE INPUT THIS CHARACTER. 
+        shouts, THIS IS THE NEXT CHARACTER GIVEN WE INPUT THIS CHARACTER, even when we train it for this task. 
 
         Now, we have split the process:
             self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
@@ -176,20 +177,20 @@ class BigramLanguageModel(nn.Module):
         When 43 ('a') comes in, we look up a vector of size 32. These 32 numbers are NOT predictions. 
         They are Attributes (or Features) of the character 'a'.
 
-        This vector (B, T, n_embed) is the "Hidden State". 
+        This vector (B, T, n_embed) is the "Hidden State" (nn.embedding)
         It is the model's internal representation of the data before it tries to guess the answer.
 
         we have lm_head (Language Modeling Head). 
         Its job is to take those 32 attributes and translate them into 65 probabilities.
 
-        We you want to use Self-Attention,so we need a "workspace" where the tokens can talk to each other, 
+        We want to use Self-Attention,so we need a "workspace" where the tokens can talk to each other, 
         which we do in the hidden state of tok_embd (nn.Embedding) (internal features or representations.)
         """
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx) #(B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #ints from 0 to T-1. #(T,C)
 
-        x = tok_emb + pos_emb #(B,T,C)
+        x = tok_emb + pos_emb #(B,T,C) broadcasting rules work
         x = self.transformer_blocks(x)
         x = self.layer_norm(x)
         logits = self.lm_head(x) #language modeling head. This is where they predict the next token. 
