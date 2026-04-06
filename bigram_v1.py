@@ -6,8 +6,7 @@ from torch.nn import functional as F
 If you take a token index, convert it into a one-hot vector 
 (a vector of zeros with a "1" at the token's position),
  and pass it through an nn.Linear layer (with no bias), 
- the result is identical to nn.Embedding.$$OneHot(index) 
- \times WeightMatrix = Row(index)$$The reason we use nn.Embedding 
+ the result is identical to nn.Embedding.$$OneHot(index)\times WeightMatrix = Row(index)$$The reason we use nn.Embedding 
  for token tables instead of nn.Linear is efficiency. 
  In a vocabulary of 50,000 words, a one-hot vector has 49,999 zeros.
  Multiplying by those zeros is a waste of computer power. nn.Embedding skips the math and just fetches the row.
@@ -99,6 +98,7 @@ class BigramLanguageModel(nn.Module):
           packed into a (4, 8) grid for convenience.
         """
         logits = self.token_embedding_table(idx) #raw scores given for each character.
+        #Note: logits' shape is: output shape = input shape + (embedding dim,)  [for inference (1,1,65): out = (1,1) + (65,)]
         if targets is None: 
             loss = None
         else: 
@@ -115,13 +115,13 @@ class BigramLanguageModel(nn.Module):
         for _ in range(max_new_tokens): 
             logits, _ = self(idx) 
 
-            logits = logits[:, -1, :] 
+            logits = logits[:, -1, :] #the last row which is [1,65] in shape, are the scores of the next token from the vocab
             probs = F.softmax(logits, dim=-1) # (B , C)
 
             idx_next = torch.multinomial(probs, num_samples=1) #(B, 1)
 
             idx = torch.cat((idx,idx_next), dim=1) 
-        return idx
+        return idx #shape [1, max_new_tokens]
 
 #Lets run inference on it to find out how random initializations 
 #of the embeddings give a loss. 

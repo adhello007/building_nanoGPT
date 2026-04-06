@@ -94,7 +94,12 @@ class Head(nn.Module):
         q = self.query(x) #B,T,C
 
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 #We are using head_size here instead of C because q and k are projected down. 
-        wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf')) #we might have a smaller T than context-size 
+        wei = wei.masked_fill(self.tril[:T,:T]==0, float('-inf')) #we might have a smaller T than context-size during inference. 
+        """
+        while training: T is exactly equal to context_size
+
+        during inference: T starts at 1 and grows one by one until it hits context_size.
+        """
         wei = F.softmax(wei, dim=-1) #against the channel dimension
         wei = self.dropout(wei) 
         #perform weighted aggregation of the values 
